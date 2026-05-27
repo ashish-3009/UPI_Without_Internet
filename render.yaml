@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: upi-offline-mesh
+    env: java
+    plan: free
+    buildCommand: ./mvnw clean package -DskipTests
+    startCommand: java -jar target/upi-offline-mesh-0.0.1-SNAPSHOT.jar
+    envVars:
+      - key: SPRING_DATASOURCE_URL
+        value: jdbc:postgresql://dpg-d8bi8gsua31s73du4lsg-a.oregon-postgres.render.com:5432/meshpay_8ygq
+      - key: SPRING_DATASOURCE_USERNAME
+        value: meshpay_8ygq_user
+      - key: SPRING_DATASOURCE_PASSWORD
+        value: oX7u02Kgm4g1Wp5rj9a3cmkDOjDiev9G
+      - key: JAVA_VERSION
+        value: 17
