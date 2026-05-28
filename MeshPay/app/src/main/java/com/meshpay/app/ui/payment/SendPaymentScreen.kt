@@ -3,17 +3,32 @@ package com.meshpay.app.ui.payment
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
 fun SendPaymentScreen(
     onNavigateBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    viewModel: SendPaymentViewModel = viewModel()
 ) {
+    var recipientVpa by rememberSaveable { mutableStateOf("") }
+    var amountText by rememberSaveable { mutableStateOf("") }
+    var pin by rememberSaveable { mutableStateOf("") }
+
+    val senderVpa by viewModel.senderVpa.collectAsStateWithLifecycle()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -30,6 +45,14 @@ fun SendPaymentScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
+            text = "From: ${senderVpa.ifBlank { "Not registered" }}",
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
             text = "Payment will hop via nearby peers until internet is found.",
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -38,39 +61,75 @@ fun SendPaymentScreen(
         Spacer(modifier = Modifier.height(32.dp))
 
         OutlinedTextField(
-            value = "",
-            onValueChange = {},
+            value = recipientVpa,
+            onValueChange = { recipientVpa = it },
             label = { Text("Recipient VPA") },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
         OutlinedTextField(
-            value = "",
-            onValueChange = {},
-            label = { Text("Amount (₹)") },
-            modifier = Modifier.fillMaxWidth()
+            value = amountText,
+            onValueChange = { value -> amountText = value.filter { it.isDigit() } },
+            label = { Text("Amount (Rs.)") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
         OutlinedTextField(
-            value = "",
-            onValueChange = {},
+            value = pin,
+            onValueChange = { pin = it },
             label = { Text("Enter Wallet PIN") },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation()
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        when (val state = uiState) {
+            is SendPaymentUiState.Success -> Text(
+                text = state.message,
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp
+            )
+            is SendPaymentUiState.Error -> Text(
+                text = state.message,
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 14.sp
+            )
+            SendPaymentUiState.Sending -> Text(
+                text = "Sending packet...",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp
+            )
+            SendPaymentUiState.Idle -> Unit
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         Button(
-            onClick = onNavigateBack,
+            onClick = { viewModel.sendPayment(recipientVpa, amountText, pin) },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
+                .height(50.dp),
+            enabled = uiState !is SendPaymentUiState.Sending
         ) {
-            Text("Send Offline", fontSize = 16.sp)
+            if (uiState is SendPaymentUiState.Sending) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Sending", fontSize = 16.sp)
+            } else {
+                Text("Send Offline", fontSize = 16.sp)
+            }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -79,7 +138,7 @@ fun SendPaymentScreen(
             onClick = onNavigateBack,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Cancel")
+            Text("Back to Wallet")
         }
     }
 }

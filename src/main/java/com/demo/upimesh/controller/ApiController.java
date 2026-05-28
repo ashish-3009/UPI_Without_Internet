@@ -309,6 +309,11 @@ public class ApiController {
             // Fall through to formatted timestamp parsing.
         }
         try {
+            return Instant.parse(value).toEpochMilli();
+        } catch (DateTimeParseException ignored) {
+            // Fall through to the legacy mobile timestamp format.
+        }
+        try {
             return LocalDateTime.parse(value, MOBILE_TIMESTAMP)
                     .atZone(ZoneId.systemDefault())
                     .toInstant()
@@ -323,6 +328,16 @@ public class ApiController {
     @GetMapping("/accounts")
     public List<Account> listAccounts() {
         return accountRepo.findAll();
+    }
+
+    @GetMapping("/wallet/{vpa}")
+    public ResponseEntity<?> wallet(@PathVariable String vpa) {
+        return accountRepo.findById(vpa.toLowerCase(Locale.ROOT))
+                .<ResponseEntity<?>>map(account -> ResponseEntity.ok(Map.of(
+                        "vpa", account.getVpa(),
+                        "balance", account.getBalance()
+                )))
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     @GetMapping("/transactions")

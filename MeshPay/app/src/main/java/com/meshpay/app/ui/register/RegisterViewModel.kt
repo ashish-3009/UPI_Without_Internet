@@ -4,16 +4,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.meshpay.app.network.RegisterRequest
 import com.meshpay.app.network.RetrofitClient
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.Locale
 import java.util.UUID
 
 sealed class RegisterUiState {
     data object Idle : RegisterUiState()
     data object Loading : RegisterUiState()
-    data class Success(val message: String) : RegisterUiState()
+    data class Success(val message: String, val registeredVpa: String) : RegisterUiState()
     data class Error(val message: String) : RegisterUiState()
 }
 
@@ -33,15 +35,16 @@ class RegisterViewModel : ViewModel() {
             return
         }
 
+        val normalizedVpa = vpa.trim().lowercase(Locale.ROOT)
         _uiState.value = RegisterUiState.Loading
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Generate a temporary fake public key (placeholder for real crypto)
                 val fakePublicKey = "MESHPAY-PUB-" + UUID.randomUUID().toString().take(16).uppercase()
 
                 val request = RegisterRequest(
-                    userId = vpa,
+                    userId = normalizedVpa,
                     phoneNumber = fullName, // reusing as display name for now
                     publicKey = fakePublicKey
                 )
@@ -50,7 +53,8 @@ class RegisterViewModel : ViewModel() {
 
                 if (response.isSuccessful) {
                     _uiState.value = RegisterUiState.Success(
-                        response.body()?.message ?: "Registration successful"
+                        response.body()?.message ?: "Registration successful",
+                        response.body()?.userId ?: normalizedVpa
                     )
                 } else {
                     // Even a 404/405 from backend means connectivity works
@@ -59,7 +63,8 @@ class RegisterViewModel : ViewModel() {
                     if (response.code() == 404 || response.code() == 405) {
                         // Endpoint not yet deployed on backend — simulate success
                         _uiState.value = RegisterUiState.Success(
-                            "Connected to server. Wallet created locally."
+                            "Connected to server. Wallet created locally.",
+                            normalizedVpa
                         )
                     } else {
                         _uiState.value = RegisterUiState.Error(

@@ -29,6 +29,7 @@ import java.time.Instant;
 public class BridgeIngestionService {
 
     private static final Logger log = LoggerFactory.getLogger(BridgeIngestionService.class);
+    private static final long FUTURE_CLOCK_SKEW_SECONDS = 300;
 
     @Autowired private HybridCryptoService crypto;
     @Autowired private IdempotencyService idempotency;
@@ -65,7 +66,7 @@ public class BridgeIngestionService {
                         packetHash.substring(0, 12) + "...", ageSeconds);
                 return IngestResult.invalid(packetHash, "stale_packet");
             }
-            if (ageSeconds < -300) { // small clock-skew tolerance
+            if (ageSeconds < -FUTURE_CLOCK_SKEW_SECONDS) {
                 return IngestResult.invalid(packetHash, "future_dated");
             }
 
@@ -100,7 +101,7 @@ public class BridgeIngestionService {
             if (ageSeconds > maxAgeSeconds) {
                 return IngestResult.invalid(packetHash, "stale_packet");
             }
-            if (ageSeconds < -300) {
+            if (ageSeconds < -FUTURE_CLOCK_SKEW_SECONDS) {
                 return IngestResult.invalid(packetHash, "future_dated");
             }
 

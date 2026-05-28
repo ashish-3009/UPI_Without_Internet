@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -26,7 +25,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,10 +37,31 @@ fun HomeWalletScreen(
     viewModel: HomeWalletViewModel = viewModel()
 ) {
     val context = LocalContext.current
-    val logs by viewModel.logs.collectAsState()
-    val connectedEndpoints by viewModel.connectedEndpoints.collectAsState()
-    val lastReceivedPacket by viewModel.lastReceivedPacket.collectAsState()
-    val uploadState by viewModel.uploadState.collectAsState()
+    val logs = viewModel.logs
+    val connectedEndpoints by viewModel.connectedEndpoints.collectAsStateWithLifecycle()
+    val isAdvertising by viewModel.isAdvertising.collectAsStateWithLifecycle()
+    val isDiscovering by viewModel.isDiscovering.collectAsStateWithLifecycle()
+    val isConnected by viewModel.isConnected.collectAsStateWithLifecycle()
+    val lastReceivedPacket by viewModel.lastReceivedPacket.collectAsStateWithLifecycle()
+    val uploadState by viewModel.uploadState.collectAsStateWithLifecycle()
+    val registeredVpa by viewModel.registeredVpa.collectAsStateWithLifecycle()
+    val walletState by viewModel.walletState.collectAsStateWithLifecycle()
+    val uploadedPacketIds by viewModel.uploadedPacketIds.collectAsStateWithLifecycle()
+    val currentPacketUploaded = lastReceivedPacket?.packetId?.let { it in uploadedPacketIds } == true
+    val snackbarHostState = remember { SnackbarHostState() }
+    var snackbarMessage by remember { mutableStateOf<String?>(null) }
+    val walletBalanceText = when (val state = walletState) {
+        is WalletUiState.Loaded -> formatWalletAmount(state.balance)
+        is WalletUiState.Error -> state.lastBalance?.let(::formatWalletAmount) ?: "Rs. --"
+        WalletUiState.Loading -> "Refreshing..."
+        WalletUiState.Idle -> "Rs. --"
+    }
+    val walletStatusText = when (val state = walletState) {
+        is WalletUiState.Error -> state.message
+        WalletUiState.Loading -> "Refreshing backend balance..."
+        is WalletUiState.Loaded -> "Synced with backend"
+        WalletUiState.Idle -> "Balance not loaded"
+    }
 
     // Determine required permissions based on SDK level
     val requiredPermissions = remember {
@@ -75,9 +97,13 @@ fun HomeWalletScreen(
         isPermissionRequestActive = false
         val allGranted = permissionsMap.values.all { it }
         if (allGranted) {
-            Toast.makeText(context, "Permissions granted! You can now start Mesh.", Toast.LENGTH_SHORT).show()
+            val message = "Nearby permissions granted"
+            viewModel.logUiMessage(message)
+            snackbarMessage = message
         } else {
-            Toast.makeText(context, "Nearby features require all permissions to be granted.", Toast.LENGTH_LONG).show()
+            val message = "Nearby permissions are required for mesh payments"
+            viewModel.logUiMessage(message)
+            snackbarMessage = message
         }
     }
 
@@ -106,7 +132,14 @@ fun HomeWalletScreen(
         }
     }
 
+    LaunchedEffect(snackbarMessage) {
+        val message = snackbarMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        snackbarMessage = null
+    }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { 
@@ -145,18 +178,49 @@ fun HomeWalletScreen(
                             .fillMaxWidth()
                             .padding(24.dp)
                     ) {
-                        Text(
-                            text = "Offline Wallet Balance",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
-                            fontWeight = FontWeight.Medium
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Offline Wallet Balance",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                fontWeight = FontWeight.Medium
+                            )
+                            TextButton(
+                                onClick = { viewModel.refreshWalletBalance() },
+                                enabled = walletState !is WalletUiState.Loading,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                if (walletState is WalletUiState.Loading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                } else {
+                                    Text("Refresh", fontSize = 12.sp)
+                                }
+                            }
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "₹5,000.00",
+                            text = walletBalanceText,
                             fontSize = 36.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = walletStatusText,
+                            fontSize = 12.sp,
+                            color = if (walletState is WalletUiState.Error) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                            }
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(
@@ -164,7 +228,7 @@ fun HomeWalletScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "VPA: bob@mesh",
+                                text = "VPA: ${registeredVpa.ifBlank { "Not registered" }}",
                                 fontSize = 14.sp,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                             )
@@ -226,6 +290,12 @@ fun HomeWalletScreen(
                         Text(
                             text = "Discover other devices and route packets fully offline.",
                             fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Advertising: ${if (isAdvertising) "On" else "Off"}  |  Discovery: ${if (isDiscovering) "On" else "Off"}  |  Link: ${if (isConnected) "Connected" else "Idle"}",
+                            fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                         )
                         Spacer(modifier = Modifier.height(16.dp))
@@ -303,7 +373,7 @@ fun HomeWalletScreen(
                                     color = MaterialTheme.colorScheme.onTertiaryContainer
                                 )
                                 Text(
-                                    text = packet.timestamp.split(" ").lastOrNull() ?: "",
+                                    text = packet.timestamp.toDisplayTime(),
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.6f)
                                 )
@@ -375,7 +445,9 @@ fun HomeWalletScreen(
                         Button(
                             onClick = { viewModel.uploadPacketToBridge() },
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = lastReceivedPacket != null && uploadState !is UploadUiState.Uploading,
+                            enabled = lastReceivedPacket != null &&
+                                    uploadState !is UploadUiState.Uploading &&
+                                    !currentPacketUploaded,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.secondary
                             )
@@ -399,6 +471,14 @@ fun HomeWalletScreen(
                                 text = "⚠️ No mesh packet received yet.",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.align(Alignment.CenterHorizontally)
+                            )
+                        } else if (currentPacketUploaded) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "This packet has already been uploaded.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
                                 modifier = Modifier.align(Alignment.CenterHorizontally)
                             )
                         }
@@ -563,7 +643,8 @@ fun HomeWalletScreen(
                                     modifier = Modifier.fillMaxSize(),
                                     reverseLayout = true
                                 ) {
-                                    items(logs.reversed()) { log ->
+                                    items(logs.size) { index ->
+                                        val log = logs[logs.lastIndex - index]
                                         Text(
                                             text = log,
                                             color = if (log.contains("fail", ignoreCase = true) || log.contains("reject", ignoreCase = true)) Color.Red else if (log.contains("connect", ignoreCase = true) || log.contains("success", ignoreCase = true)) Color.Cyan else Color.Green,
@@ -580,6 +661,18 @@ fun HomeWalletScreen(
             }
         }
     }
+}
+
+private fun String.toDisplayTime(): String {
+    val value = trim()
+    if (value.contains('T')) {
+        return value.substringAfter('T').substringBefore('.').removeSuffix("Z")
+    }
+    return value.split(" ").lastOrNull().orEmpty()
+}
+
+private fun formatWalletAmount(amount: Double): String {
+    return "Rs. ${String.format(Locale.US, "%.2f", amount)}"
 }
 
 // Helper border function not needed

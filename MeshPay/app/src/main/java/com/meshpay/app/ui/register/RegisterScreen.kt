@@ -3,14 +3,17 @@ package com.meshpay.app.ui.register
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meshpay.app.data.UserSession
 
 @Composable
 fun RegisterScreen(
@@ -18,15 +21,18 @@ fun RegisterScreen(
     modifier: Modifier = Modifier,
     viewModel: RegisterViewModel = viewModel { RegisterViewModel() }
 ) {
-    var fullName by remember { mutableStateOf("") }
-    var vpa by remember { mutableStateOf("") }
-    var pin by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    var fullName by rememberSaveable { mutableStateOf("") }
+    var vpa by rememberSaveable { mutableStateOf("") }
+    var pin by rememberSaveable { mutableStateOf("") }
 
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     // Navigate to home on success
     LaunchedEffect(uiState) {
-        if (uiState is RegisterUiState.Success) {
+        val success = uiState as? RegisterUiState.Success
+        if (success != null) {
+            UserSession.saveRegisteredVpa(context, success.registeredVpa)
             onNavigateToHome()
         }
     }
