@@ -65,10 +65,14 @@ fun HomeWalletScreen(
         }
     }
 
+    // State to track if a permission request is currently active to prevent multiple triggers
+    var isPermissionRequestActive by remember { mutableStateOf(false) }
+
     // Permission request launcher
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissionsMap ->
+        isPermissionRequestActive = false
         val allGranted = permissionsMap.values.all { it }
         if (allGranted) {
             Toast.makeText(context, "Permissions granted! You can now start Mesh.", Toast.LENGTH_SHORT).show()
@@ -88,7 +92,16 @@ fun HomeWalletScreen(
     fun runWithPermissions(action: () -> Unit) {
         if (hasAllPermissions(context)) {
             action()
-        } else {
+        } else if (!isPermissionRequestActive) {
+            isPermissionRequestActive = true
+            permissionLauncher.launch(requiredPermissions.toTypedArray())
+        }
+    }
+
+    // Request permissions automatically once when the screen is first loaded
+    LaunchedEffect(Unit) {
+        if (!hasAllPermissions(context) && !isPermissionRequestActive) {
+            isPermissionRequestActive = true
             permissionLauncher.launch(requiredPermissions.toTypedArray())
         }
     }
