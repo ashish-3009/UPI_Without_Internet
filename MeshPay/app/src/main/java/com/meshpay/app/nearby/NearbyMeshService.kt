@@ -36,8 +36,8 @@ class NearbyMeshService private constructor(context: Context) {
     private val connectionsClient = Nearby.getConnectionsClient(appContext)
     private val serviceId = "com.meshpay.app"
     private val localEndpointName = "MeshNode-" + android.os.Build.MODEL
-    private val nearbyStrategy = Strategy.P2P_POINT_TO_POINT
-    private val nearbyStrategyName = "P2P_POINT_TO_POINT"
+    private val nearbyStrategy = Strategy.P2P_CLUSTER
+    private val nearbyStrategyName = "P2P_CLUSTER"
     private val stateLock = Any()
 
     private val _logEvents = MutableSharedFlow<String>(
