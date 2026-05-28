@@ -3,11 +3,16 @@ package com.demo.upimesh.controller;
 import com.demo.upimesh.crypto.ServerKeyHolder;
 import com.demo.upimesh.model.*;
 import com.demo.upimesh.service.*;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 
 /**
@@ -30,6 +35,10 @@ public class ApiController {
     @Autowired private AccountRepository accountRepo;
     @Autowired private TransactionRepository txRepo;
     @Autowired private IdempotencyService idempotency;
+    @Autowired private ObjectMapper objectMapper;
+
+    private static final DateTimeFormatter MOBILE_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // ------------------------------------------------------------------ key
 
@@ -154,12 +163,159 @@ public class ApiController {
      */
     @PostMapping("/bridge/ingest")
     public ResponseEntity<?> ingest(
-            @RequestBody MeshPacket packet,
+            @RequestBody JsonNode payload,
             @RequestHeader(value = "X-Bridge-Node-Id", defaultValue = "unknown") String bridgeNodeId,
             @RequestHeader(value = "X-Hop-Count", defaultValue = "0") int hopCount) {
 
+        BridgeIngestionService.PlainDemoPacket plainPacket = plainDemoPacket(payload);
+        if (plainPacket != null) {
+            BridgeIngestionService.IngestResult r =
+                    bridge.ingestPlainDemoPacket(plainPacket, bridgeNodeId, hopCount);
+            return ResponseEntity.ok(bridgeResponse(plainPacket.packetId(), r));
+        }
+
+        MeshPacket packet = encryptedMeshPacket(payload);
         BridgeIngestionService.IngestResult r = bridge.ingest(packet, bridgeNodeId, hopCount);
-        return ResponseEntity.ok(r);
+        return ResponseEntity.ok(bridgeResponse(packet.getPacketId(), r));
+    }
+
+    private BridgeIngestionService.PlainDemoPacket plainDemoPacket(JsonNode payload) {
+        JsonNode rawPacket = payload;
+        String hashMaterial = payload.toString();
+
+        String ciphertext = text(payload, "ciphertext");
+        if (ciphertext != null && ciphertext.trim().startsWith("{")) {
+            try {
+                rawPacket = objectMapper.readTree(ciphertext);
+                hashMaterial = ciphertext;
+            } catch (Exception ignored) {
+                rawPacket = payload;
+            }
+        }
+
+        String sender = firstText(rawPacket, "senderVpa", "sender");
+        String receiver = firstText(rawPacket, "receiverVpa", "receiver");
+        if (sender == null || receiver == null) {
+            return null;
+        }
+
+        BigDecimal amount = decimal(rawPacket, "amount");
+        if (amount == null) {
+            return null;
+        }
+
+        String packetId = firstText(rawPacket, "packetId");
+        if (packetId == null) {
+            packetId = firstText(payload, "packetId");
+        }
+        if (packetId == null) {
+            packetId = UUID.randomUUID().toString();
+        }
+
+        long signedAt = timestampMillis(firstText(rawPacket, "signedAt", "timestamp", "createdAt"));
+        return new BridgeIngestionService.PlainDemoPacket(
+                packetId,
+                sender,
+                receiver,
+                amount,
+                signedAt,
+                hashMaterial);
+    }
+
+    private MeshPacket encryptedMeshPacket(JsonNode payload) {
+        MeshPacket packet = new MeshPacket();
+        packet.setPacketId(Optional.ofNullable(text(payload, "packetId"))
+                .orElse(UUID.randomUUID().toString()));
+        packet.setTtl(payload.path("ttl").asInt(5));
+        packet.setCreatedAt(createdAtMillis(payload.path("createdAt")));
+        packet.setCiphertext(text(payload, "ciphertext"));
+        return packet;
+    }
+
+    private Map<String, Object> bridgeResponse(String packetId, BridgeIngestionService.IngestResult result) {
+        String message = result.reason() == null ? messageFor(result.outcome()) : result.reason();
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", result.outcome());
+        response.put("message", message);
+        response.put("packetId", packetId);
+        response.put("hash", result.packetHash());
+        response.put("outcome", result.outcome());
+        response.put("packetHash", result.packetHash());
+        response.put("reason", result.reason());
+        response.put("transactionId", result.transactionId());
+        return response;
+    }
+
+    private String messageFor(String outcome) {
+        return switch (outcome) {
+            case "SETTLED" -> "Packet settled successfully";
+            case "DUPLICATE_DROPPED" -> "Duplicate packet dropped";
+            case "INVALID" -> "Invalid packet";
+            default -> outcome;
+        };
+    }
+
+    private String firstText(JsonNode node, String... names) {
+        for (String name : names) {
+            String value = text(node, name);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String text(JsonNode node, String name) {
+        JsonNode value = node.get(name);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        String text = value.asText();
+        return text == null || text.isBlank() ? null : text;
+    }
+
+    private BigDecimal decimal(JsonNode node, String name) {
+        JsonNode value = node.get(name);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isNumber()) {
+            return value.decimalValue();
+        }
+        try {
+            return new BigDecimal(value.asText());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private Long createdAtMillis(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return Instant.now().toEpochMilli();
+        }
+        if (value.isNumber()) {
+            return value.asLong();
+        }
+        return timestampMillis(value.asText());
+    }
+
+    private long timestampMillis(String value) {
+        if (value == null || value.isBlank()) {
+            return Instant.now().toEpochMilli();
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            // Fall through to formatted timestamp parsing.
+        }
+        try {
+            return LocalDateTime.parse(value, MOBILE_TIMESTAMP)
+                    .atZone(ZoneId.systemDefault())
+                    .toInstant()
+                    .toEpochMilli();
+        } catch (DateTimeParseException ignored) {
+            return Instant.now().toEpochMilli();
+        }
     }
 
     // ------------------------------------------------------------- accounts

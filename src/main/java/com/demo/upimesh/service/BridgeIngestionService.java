@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
@@ -78,6 +79,39 @@ public class BridgeIngestionService {
         }
     }
 
+    public IngestResult ingestPlainDemoPacket(PlainDemoPacket packet, String bridgeNodeId, int hopCount) {
+        try {
+            String packetHash = crypto.hashCiphertext(packet.hashMaterial());
+            if (!idempotency.claim(packetHash)) {
+                log.info("DUPLICATE plain demo packet {} from bridge {} dropped",
+                        packetHash.substring(0, 12) + "...", bridgeNodeId);
+                return IngestResult.duplicate(packetHash);
+            }
+
+            PaymentInstruction instruction = new PaymentInstruction(
+                    packet.senderVpa(),
+                    packet.receiverVpa(),
+                    packet.amount(),
+                    "mobile-demo",
+                    packet.packetId(),
+                    packet.signedAtMillis());
+
+            long ageSeconds = (Instant.now().toEpochMilli() - instruction.getSignedAt()) / 1000;
+            if (ageSeconds > maxAgeSeconds) {
+                return IngestResult.invalid(packetHash, "stale_packet");
+            }
+            if (ageSeconds < -300) {
+                return IngestResult.invalid(packetHash, "future_dated");
+            }
+
+            Transaction tx = settlement.settle(instruction, packetHash, bridgeNodeId, hopCount);
+            return IngestResult.settled(packetHash, tx);
+        } catch (Exception e) {
+            log.error("Plain demo ingestion error: {}", e.getMessage(), e);
+            return IngestResult.invalid("?", "internal_error: " + e.getMessage());
+        }
+    }
+
     public record IngestResult(String outcome, String packetHash, String reason, Long transactionId) {
         public static IngestResult settled(String hash, Transaction tx) {
             return new IngestResult("SETTLED", hash, null, tx.getId());
@@ -88,5 +122,14 @@ public class BridgeIngestionService {
         public static IngestResult invalid(String hash, String reason) {
             return new IngestResult("INVALID", hash, reason, null);
         }
+    }
+
+    public record PlainDemoPacket(
+            String packetId,
+            String senderVpa,
+            String receiverVpa,
+            BigDecimal amount,
+            long signedAtMillis,
+            String hashMaterial) {
     }
 }

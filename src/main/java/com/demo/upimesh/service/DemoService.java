@@ -33,12 +33,18 @@ public class DemoService {
 
     @PostConstruct
     public void seedAccounts() {
-        if (accounts.count() == 0) {
-            accounts.save(new Account("alice@demo", "Alice",   new BigDecimal("5000.00")));
-            accounts.save(new Account("bob@demo",   "Bob",     new BigDecimal("1000.00")));
-            accounts.save(new Account("carol@demo", "Carol",   new BigDecimal("2500.00")));
-            accounts.save(new Account("dave@demo",  "Dave",    new BigDecimal("500.00")));
-            log.info("Seeded 4 demo accounts");
+        ensureAccount("alice@demo", "Alice", new BigDecimal("5000.00"));
+        ensureAccount("bob@demo", "Bob", new BigDecimal("1000.00"));
+        ensureAccount("carol@demo", "Carol", new BigDecimal("2500.00"));
+        ensureAccount("dave@demo", "Dave", new BigDecimal("500.00"));
+        ensureAccount("a@meshpay", "MeshPay Sender", new BigDecimal("5000.00"));
+        ensureAccount("b@meshpay", "MeshPay Receiver", new BigDecimal("1000.00"));
+        log.info("Demo accounts are ready");
+    }
+
+    private void ensureAccount(String vpa, String holderName, BigDecimal balance) {
+        if (!accounts.existsById(vpa)) {
+            accounts.save(new Account(vpa, holderName, balance));
         }
     }
 
