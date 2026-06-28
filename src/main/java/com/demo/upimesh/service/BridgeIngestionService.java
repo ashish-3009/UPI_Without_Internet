@@ -72,7 +72,7 @@ public class BridgeIngestionService {
 
             // ---- Settle ----
             Transaction tx = settlement.settle(instruction, packetHash, bridgeNodeId, hopCount);
-            return IngestResult.settled(packetHash, tx);
+            return resultFor(packetHash, tx);
 
         } catch (Exception e) {
             log.error("Ingestion error: {}", e.getMessage(), e);
@@ -106,11 +106,23 @@ public class BridgeIngestionService {
             }
 
             Transaction tx = settlement.settle(instruction, packetHash, bridgeNodeId, hopCount);
-            return IngestResult.settled(packetHash, tx);
+            return resultFor(packetHash, tx);
         } catch (Exception e) {
             log.error("Plain demo ingestion error: {}", e.getMessage(), e);
             return IngestResult.invalid("?", "internal_error: " + e.getMessage());
         }
+    }
+
+    /**
+     * Maps the persisted transaction status to the wire outcome. The settlement
+     * layer records REJECTED (e.g. insufficient balance) without moving money, so
+     * we must NOT report it as SETTLED.
+     */
+    private IngestResult resultFor(String packetHash, Transaction tx) {
+        if (tx.getStatus() == Transaction.Status.REJECTED) {
+            return IngestResult.rejected(packetHash, tx);
+        }
+        return IngestResult.settled(packetHash, tx);
     }
 
     public record IngestResult(String outcome, String packetHash, String reason, Long transactionId) {
@@ -119,6 +131,9 @@ public class BridgeIngestionService {
         }
         public static IngestResult duplicate(String hash) {
             return new IngestResult("DUPLICATE_DROPPED", hash, null, null);
+        }
+        public static IngestResult rejected(String hash, Transaction tx) {
+            return new IngestResult("REJECTED", hash, null, tx.getId());
         }
         public static IngestResult invalid(String hash, String reason) {
             return new IngestResult("INVALID", hash, reason, null);

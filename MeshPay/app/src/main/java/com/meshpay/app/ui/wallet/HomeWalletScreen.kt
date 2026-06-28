@@ -406,7 +406,7 @@ fun HomeWalletScreen(
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Amount: ₹${packet.amount}",
+                                text = "Amount: ₹${formatPlainAmount(packet.amount)}",
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onTertiaryContainer
@@ -673,6 +673,10 @@ private fun String.toDisplayTime(): String {
 
 private fun formatWalletAmount(amount: Double): String {
     return "Rs. ${String.format(Locale.US, "%.2f", amount)}"
+}
+
+private fun formatPlainAmount(amount: Double): String {
+    return String.format(Locale.US, "%.2f", amount)
 }
 
 // Helper border function not needed

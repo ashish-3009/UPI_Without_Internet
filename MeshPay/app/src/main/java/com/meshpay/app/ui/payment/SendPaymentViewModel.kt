@@ -12,9 +12,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.math.BigDecimal
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import com.meshpay.app.ServiceLocator
+import com.meshpay.app.data.entity.PacketEntity
+import com.meshpay.app.data.entity.PacketStatus
 
 sealed class SendPaymentUiState {
     data object Idle : SendPaymentUiState()
@@ -36,7 +40,9 @@ class SendPaymentViewModel(application: Application) : AndroidViewModel(applicat
     fun sendPayment(receiverVpa: String, amountText: String, pin: String) {
         val sender = _senderVpa.value
         val receiver = receiverVpa.trim().lowercase(Locale.ROOT)
-        val amount = amountText.toIntOrNull()
+        // Parse as BigDecimal so we can validate the two-decimal (paise) scale the
+        // backend ledger uses, then carry the value as Double on the packet.
+        val amountValue = amountText.trim().toBigDecimalOrNull()
 
         if (sender.isBlank()) {
             _uiState.value = SendPaymentUiState.Error("Register a wallet before sending.")
@@ -46,10 +52,11 @@ class SendPaymentViewModel(application: Application) : AndroidViewModel(applicat
             _uiState.value = SendPaymentUiState.Error("Recipient VPA is required.")
             return
         }
-        if (amount == null || amount <= 0) {
-            _uiState.value = SendPaymentUiState.Error("Enter a valid amount.")
+        if (amountValue == null || amountValue.signum() <= 0 || amountValue.scale() > 2) {
+            _uiState.value = SendPaymentUiState.Error("Enter a valid amount (max two decimal places).")
             return
         }
+        val amount = amountValue.toDouble()
         if (pin.isBlank()) {
             _uiState.value = SendPaymentUiState.Error("Wallet PIN is required.")
             return
@@ -68,6 +75,20 @@ class SendPaymentViewModel(application: Application) : AndroidViewModel(applicat
         )
         _uiState.value = SendPaymentUiState.Sending
         viewModelScope.launch(Dispatchers.IO) {
+            val packetEntity = PacketEntity(
+                packetId = packet.packetId,
+                senderVPA = packet.sender,
+                receiverVPA = packet.receiver,
+                amount = packet.amount,
+                createdAt = Instant.parse(packet.timestamp).toEpochMilli(),
+                lastSeenAt = Instant.parse(packet.timestamp).toEpochMilli(),
+                hopCount = 0,
+                ttl = 10,
+                status = PacketStatus.CREATED,
+                uploadedBy = null
+            )
+            ServiceLocator.packetRepository.insertPacket(packetEntity)
+
             val sent = nearbyService.broadcastMeshPacket(packet)
             _uiState.value = if (sent) {
                 val pendingBalance = walletRepository.getWallet(sender)

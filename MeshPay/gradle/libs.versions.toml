@@ -15,7 +15,8 @@ nav3Core = "1.0.1"
 lifecycleViewmodelNav3 = "2.10.0"
 retrofit = "2.11.0"
 gson = "2.11.0"
-room = "2.6.1"
+ksp = "2.3.9"
+room = "2.8.4"
 playServicesNearby = "19.3.0"
 
 
@@ -55,4 +56,5 @@ kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-c
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 room = { id = "androidx.room", version.ref = "room" }

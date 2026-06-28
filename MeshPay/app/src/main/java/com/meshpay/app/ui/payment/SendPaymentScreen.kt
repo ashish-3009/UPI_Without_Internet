@@ -1,6 +1,7 @@
 package com.meshpay.app.ui.payment
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -10,6 +11,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,10 +74,11 @@ fun SendPaymentScreen(
 
         OutlinedTextField(
             value = amountText,
-            onValueChange = { value -> amountText = value.filter { it.isDigit() } },
+            onValueChange = { value -> amountText = sanitizeAmountInput(value) },
             label = { Text("Amount (Rs.)") },
             modifier = Modifier.fillMaxWidth(),
-            singleLine = true
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -141,4 +144,19 @@ fun SendPaymentScreen(
             Text("Back to Wallet")
         }
     }
+}
+
+/**
+ * Keeps only digits and a single decimal point, capped at two fraction digits,
+ * so the field accepts paise (e.g. "99.50") without allowing malformed input.
+ */
+private fun sanitizeAmountInput(raw: String): String {
+    val filtered = raw.filter { it.isDigit() || it == '.' }
+    val firstDot = filtered.indexOf('.')
+    if (firstDot < 0) {
+        return filtered
+    }
+    val integerPart = filtered.substring(0, firstDot)
+    val fractionPart = filtered.substring(firstDot + 1).replace(".", "").take(2)
+    return "$integerPart.$fractionPart"
 }
