@@ -2,6 +2,7 @@ package com.meshpay.app.network
 
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.Path
 import retrofit2.http.POST
 import retrofit2.Response
@@ -21,7 +22,11 @@ interface ApiService {
     suspend fun getWallet(@Path("vpa") vpa: String): Response<WalletResponse>
 
     @POST("/api/bridge/ingest")
-    suspend fun bridgeIngest(@Body request: BridgeIngestRequest): Response<BridgeIngestResponse>
+    suspend fun bridgeIngest(
+        @Body request: BridgeIngestRequest,
+        @Header("X-Bridge-Node-Id") bridgeNodeId: String,
+        @Header("X-Hop-Count") hopCount: Int
+    ): Response<BridgeIngestResponse>
 }
 
 // ── Request / Response models ──

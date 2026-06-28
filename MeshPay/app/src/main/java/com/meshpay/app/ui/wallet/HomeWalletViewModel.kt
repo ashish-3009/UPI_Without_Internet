@@ -23,9 +23,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import com.meshpay.app.ServiceLocator
+import com.meshpay.app.data.entity.PacketEntity
+import com.meshpay.app.data.entity.PacketStatus
 
 sealed class UploadUiState {
     data object Idle : UploadUiState()
@@ -81,11 +85,26 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
 
         viewModelScope.launch {
             nearbyService.receivedPackets.collect { packet ->
-                _lastReceivedPacket.value = packet
+                // Persist the received packet to Room before caching it in memory.
+                // This makes the store-carry-forward backlog durable across process
+                // death and lets the Room-based upload de-dup be authoritative for
+                // packets this node received (not just ones it created locally).
+                persistReceivedPacket(packet)
+                ServiceLocator.packetStore.addPacket(packet)
+                refreshLastReceivedPacket()
                 if (_uploadState.value !is UploadUiState.Uploading) {
                     _uploadState.value = UploadUiState.Idle
                 }
             }
+        }
+
+        viewModelScope.launch {
+            var attempts = 0
+            while (ServiceLocator.packetStore.getCachedPackets().isEmpty() && attempts < 5) {
+                delay(50)
+                attempts++
+            }
+            refreshLastReceivedPacket()
         }
     }
 
@@ -112,12 +131,57 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
             packetId = UUID.randomUUID().toString(),
             sender = senderVpa,
             receiver = senderVpa,
-            amount = 500,
+            amount = 500.0,
             timestamp = Instant.now().toString()
         )
 
         viewModelScope.launch(Dispatchers.IO) {
+            val packetEntity = PacketEntity(
+                packetId = testPacket.packetId,
+                senderVPA = testPacket.sender,
+                receiverVPA = testPacket.receiver,
+                amount = testPacket.amount,
+                createdAt = Instant.parse(testPacket.timestamp).toEpochMilli(),
+                lastSeenAt = Instant.parse(testPacket.timestamp).toEpochMilli(),
+                hopCount = 0,
+                ttl = 10,
+                status = PacketStatus.CREATED,
+                uploadedBy = null
+            )
+            ServiceLocator.packetRepository.insertPacket(packetEntity)
+            ServiceLocator.packetStore.addPacket(testPacket)
+
             nearbyService.broadcastMeshPacket(testPacket)
+
+            withContext(Dispatchers.Main) {
+                refreshLastReceivedPacket()
+            }
+        }
+    }
+
+    private suspend fun persistReceivedPacket(packet: MeshPacket) {
+        val now = System.currentTimeMillis()
+        val createdAt = try {
+            Instant.parse(packet.timestamp).toEpochMilli()
+        } catch (e: Exception) {
+            now
+        }
+        val entity = PacketEntity(
+            packetId = packet.packetId,
+            senderVPA = packet.sender,
+            receiverVPA = packet.receiver,
+            amount = packet.amount,
+            createdAt = createdAt,
+            lastSeenAt = now,
+            hopCount = 1,
+            ttl = 10,
+            status = PacketStatus.RELAYING,
+            uploadedBy = null
+        )
+        // insertPacket uses OnConflictStrategy.IGNORE, so re-receiving a packet (or
+        // one already marked UPLOADED/SETTLED) will not overwrite its stored state.
+        withContext(Dispatchers.IO) {
+            ServiceLocator.packetRepository.insertPacket(entity)
         }
     }
 
@@ -129,19 +193,28 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
             return
         }
 
-        if (_uploadedPacketIds.value.contains(packet.packetId)) {
-            logToService("upload skipped - packet ${packet.packetId} was already uploaded")
-            _uploadState.value = UploadUiState.Error(
-                "This packet was already uploaded. Receive or create a fresh packet before uploading again."
-            )
-            return
-        }
-
         _uploadState.value = UploadUiState.Uploading
         logToService("upload started for packet ${packet.packetId}")
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // Room is the source of truth for whether a packet is still pending.
+                // If the packet was already moved past CREATED/RELAYING (e.g. UPLOADED),
+                // it must not be uploaded again - this survives process restarts.
+                val existing = ServiceLocator.packetRepository.getPacketById(packet.packetId)
+                if (existing != null &&
+                    existing.status != PacketStatus.CREATED &&
+                    existing.status != PacketStatus.RELAYING
+                ) {
+                    logToService(
+                        "upload skipped - packet ${packet.packetId} already processed (status ${existing.status})"
+                    )
+                    _uploadState.value = UploadUiState.Error(
+                        "This packet was already uploaded. Receive or create a fresh packet before uploading again."
+                    )
+                    return@launch
+                }
+
                 if (!isInternetAvailable()) {
                     logToService("upload failed - no internet connection")
                     _uploadState.value = UploadUiState.Error("No internet connection. Turn on Wi-Fi or mobile data first.")
@@ -156,17 +229,53 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
                     ciphertext = plainPayload
                 )
 
-                val response = RetrofitClient.apiService.bridgeIngest(request)
+                // Identify this device as the uploading bridge node and forward the
+                // packet's accumulated hop count so the backend records real
+                // provenance instead of defaulting to "unknown" / 0.
+                val bridgeNodeId = UserSession.getOrCreateDeviceId(getApplication())
+                val hopCount = existing?.hopCount ?: 0
+                val response = RetrofitClient.apiService.bridgeIngest(request, bridgeNodeId, hopCount)
 
                 if (response.isSuccessful) {
                     val body = response.body()
                     val status = body?.status ?: "UNKNOWN"
                     val message = body?.message ?: "No details"
-                    logToService("upload success - status: $status")
-                    _uploadedPacketIds.value = _uploadedPacketIds.value + packet.packetId
-                    _uploadState.value = UploadUiState.Success(status, message)
-                    if (status == "SETTLED") {
-                        refreshSettlementWallets(packet)
+
+                    // Only SETTLED (money moved) and DUPLICATE_DROPPED (already
+                    // ingested by the bridge) are terminal. INVALID / REJECTED /
+                    // unknown mean nothing settled, so the packet must stay pending
+                    // and remain retryable instead of being retired locally.
+                    val terminal = status == "SETTLED" || status == "DUPLICATE_DROPPED"
+                    if (terminal) {
+                        logToService("upload complete - status: $status")
+
+                        // Persist the terminal state in Room so the packet is no
+                        // longer pending (CREATED/RELAYING) and PacketStore will not
+                        // restore it after a restart.
+                        if (status == "SETTLED") {
+                            ServiceLocator.packetRepository.markSettled(packet.packetId)
+                        } else {
+                            ServiceLocator.packetRepository.markUploaded(packet.packetId)
+                        }
+
+                        ServiceLocator.packetStore.removePacket(packet.packetId)
+                        _uploadedPacketIds.value = _uploadedPacketIds.value + packet.packetId
+                        nearbyService.clearLatestPacket()
+
+                        // Show only this packet's result; do not pin it above a
+                        // different, not-yet-uploaded packet. The next pending packet
+                        // is surfaced when the user dismisses via resetUploadState().
+                        withContext(Dispatchers.Main) {
+                            _lastReceivedPacket.value = null
+                        }
+                        _uploadState.value = UploadUiState.Success(status, message)
+                        if (status == "SETTLED") {
+                            refreshSettlementWallets(packet)
+                        }
+                    } else {
+                        // Not settled: keep the packet pending/selectable for retry.
+                        logToService("upload not settled - status: $status ($message)")
+                        _uploadState.value = UploadUiState.Error("Not settled ($status): $message")
                     }
                 } else {
                     val errorBody = response.errorBody()?.string() ?: "Unknown error"
@@ -185,6 +294,9 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
 
     fun resetUploadState() {
         _uploadState.value = UploadUiState.Idle
+        // After a terminal upload the selected packet was cleared; surface the next
+        // pending packet (if any) now that the result card is dismissed.
+        refreshLastReceivedPacket()
     }
 
     fun refreshWalletBalance() {
@@ -294,6 +406,26 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun logToService(message: String) {
         nearbyService.logEvent(message)
+    }
+
+    private fun refreshLastReceivedPacket() {
+        val received = nearbyService.latestReceivedPacket.value
+        if (received != null && !_uploadedPacketIds.value.contains(received.packetId)) {
+            _lastReceivedPacket.value = received
+            return
+        }
+
+        val pendingPackets = ServiceLocator.packetStore.getCachedPackets()
+        val latestPending = pendingPackets
+            .filter { it.packetId !in _uploadedPacketIds.value }
+            .maxByOrNull {
+                try {
+                    Instant.parse(it.timestamp).toEpochMilli()
+                } catch (e: Exception) {
+                    0L
+                }
+            }
+        _lastReceivedPacket.value = latestPending
     }
 
     override fun onCleared() {

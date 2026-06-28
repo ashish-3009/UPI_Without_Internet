@@ -250,6 +250,7 @@ public class ApiController {
         return switch (outcome) {
             case "SETTLED" -> "Packet settled successfully";
             case "DUPLICATE_DROPPED" -> "Duplicate packet dropped";
+            case "REJECTED" -> "Payment rejected: insufficient balance";
             case "INVALID" -> "Invalid packet";
             default -> outcome;
         };

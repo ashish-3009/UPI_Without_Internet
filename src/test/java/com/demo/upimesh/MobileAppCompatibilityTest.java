@@ -198,6 +198,42 @@ class MobileAppCompatibilityTest {
                 .andExpect(jsonPath("$.status").value("SETTLED"));
     }
 
+    @Test
+    void bridgeIngestReportsRejectedWhenSenderHasInsufficientBalance() throws Exception {
+        accounts.save(new Account("poor-sender@meshpay", "Poor Sender", new BigDecimal("10.00")));
+        accounts.save(new Account("reject-receiver@meshpay", "Reject Receiver", new BigDecimal("100.00")));
+
+        String timestamp = Instant.now().toString();
+        String nearbyPacket = """
+                {
+                  "packetId": "reject-packet-1",
+                  "timestamp": "%s",
+                  "sender": "poor-sender@meshpay",
+                  "receiver": "reject-receiver@meshpay",
+                  "amount": 75
+                }
+                """.formatted(timestamp).replace("\n", "");
+        String request = """
+                {
+                  "packetId": "reject-packet-1",
+                  "ttl": 5,
+                  "createdAt": "%s",
+                  "ciphertext": %s
+                }
+                """.formatted(timestamp, jsonString(nearbyPacket));
+
+        mvc.perform(post("/api/bridge/ingest")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REJECTED"))
+                .andExpect(jsonPath("$.message").value("Payment rejected: insufficient balance"));
+
+        // No money moved on a rejected payment.
+        assertEquals(new BigDecimal("10.00"), accounts.findById("poor-sender@meshpay").orElseThrow().getBalance());
+        assertEquals(new BigDecimal("100.00"), accounts.findById("reject-receiver@meshpay").orElseThrow().getBalance());
+    }
+
     private String jsonString(String value) {
         return "\"" + value
                 .replace("\\", "\\\\")

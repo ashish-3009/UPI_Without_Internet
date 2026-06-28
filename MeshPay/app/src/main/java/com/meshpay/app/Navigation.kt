@@ -22,7 +22,9 @@ fun MainNavigation() {
 
   NavDisplay(
     backStack = backStack,
-    onBack = { backStack.removeLastOrNull() },
+    // Only pop when there is something to go back to; popping the last (root) entry
+    // would leave an empty back stack and render a blank screen.
+    onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
     entryProvider =
       entryProvider {
         entry<Register> {
