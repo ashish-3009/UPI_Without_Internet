@@ -16,6 +16,7 @@ import com.meshpay.app.nearby.NearbyMeshService
 import com.meshpay.app.network.BridgeIngestRequest
 import com.meshpay.app.network.RetrofitClient
 import com.meshpay.app.network.WalletResponse
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -30,6 +31,7 @@ import java.util.UUID
 import com.meshpay.app.ServiceLocator
 import com.meshpay.app.data.entity.PacketEntity
 import com.meshpay.app.data.entity.PacketStatus
+import com.meshpay.app.data.local.PacketStore
 
 sealed class UploadUiState {
     data object Idle : UploadUiState()
@@ -48,6 +50,7 @@ sealed class WalletUiState {
 class HomeWalletViewModel(application: Application) : AndroidViewModel(application) {
 
     private val nearbyService = NearbyMeshService.getInstance(application)
+    private val protocolHandler = ServiceLocator.meshProtocolHandler
     private val walletRepository = WalletRepository()
     private val pendingLogs = ArrayDeque<String>()
     private var logFlushJob: Job? = null
@@ -75,6 +78,9 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
 
     init {
         nearbyService.bindToScope(viewModelScope)
+        // Reliable retransmission: run the ACK retry scheduler on this scope while the
+        // mesh screen is active (Task 16). Idempotent across ViewModel recreation.
+        protocolHandler.startRetryScheduler(viewModelScope)
         refreshWalletBalance()
 
         viewModelScope.launch {
@@ -84,13 +90,26 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         viewModelScope.launch {
-            nearbyService.receivedPackets.collect { packet ->
-                // Persist the received packet to Room before caching it in memory.
-                // This makes the store-carry-forward backlog durable across process
-                // death and lets the Room-based upload de-dup be authoritative for
-                // packets this node received (not just ones it created locally).
-                persistReceivedPacket(packet)
-                ServiceLocator.packetStore.addPacket(packet)
+            // Pump raw inbound transport messages into the protocol handler, which owns
+            // deserialization and ADVERTISEMENT/REQUEST/PACKET processing.
+            nearbyService.receivedMessages.collect { inbound ->
+                // Isolate per-message failures: a transient Room/transport exception in
+                // handleInbound must not cancel this collector, or the node would silently
+                // stop processing all inbound mesh traffic until the ViewModel is recreated.
+                try {
+                    protocolHandler.handleInbound(inbound.endpointId, inbound.message)
+                } catch (e: CancellationException) {
+                    throw e // never swallow cancellation - keep structured concurrency intact
+                } catch (e: Exception) {
+                    logToService("inbound message failed from ${inbound.endpointId}: ${e.localizedMessage ?: e.javaClass.simpleName}")
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            // React to genuinely new packets the handler accepted (duplicates never
+            // reach here). UI-state only - persistence/cache/logging live in the handler.
+            protocolHandler.receivedPackets.collect {
                 refreshLastReceivedPacket()
                 if (_uploadState.value !is UploadUiState.Uploading) {
                     _uploadState.value = UploadUiState.Idle
@@ -105,6 +124,21 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
                 attempts++
             }
             refreshLastReceivedPacket()
+        }
+
+        viewModelScope.launch {
+            // Selective sync (Task 14): when a new peer connects, advertise this node's
+            // pending packet ids; the handler/peer negotiate which packets to transfer.
+            // We diff the connected-endpoint set so we advertise only to newly added
+            // endpoints. Nearby connection management is untouched - we only observe it.
+            var knownEndpoints = emptySet<String>()
+            nearbyService.connectedEndpoints.collect { current ->
+                val newlyConnected = current - knownEndpoints
+                knownEndpoints = current
+                newlyConnected.forEach { endpointId ->
+                    viewModelScope.launch { protocolHandler.advertiseTo(endpointId) }
+                }
+            }
         }
     }
 
@@ -143,15 +177,18 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
                 amount = testPacket.amount,
                 createdAt = Instant.parse(testPacket.timestamp).toEpochMilli(),
                 lastSeenAt = Instant.parse(testPacket.timestamp).toEpochMilli(),
-                hopCount = 0,
-                ttl = 10,
+                remainingHopCount = PacketStore.DEFAULT_MAX_HOPS,
                 status = PacketStatus.CREATED,
                 uploadedBy = null
             )
             ServiceLocator.packetRepository.insertPacket(packetEntity)
             ServiceLocator.packetStore.addPacket(testPacket)
 
-            nearbyService.broadcastMeshPacket(testPacket)
+            val sent = protocolHandler.broadcastPacket(testPacket)
+            if (sent) {
+                // Broadcast succeeded: the packet is now relaying through the mesh.
+                ServiceLocator.packetStore.transition(testPacket.packetId, PacketStatus.RELAYING)
+            }
 
             withContext(Dispatchers.Main) {
                 refreshLastReceivedPacket()
@@ -159,34 +196,8 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    private suspend fun persistReceivedPacket(packet: MeshPacket) {
-        val now = System.currentTimeMillis()
-        val createdAt = try {
-            Instant.parse(packet.timestamp).toEpochMilli()
-        } catch (e: Exception) {
-            now
-        }
-        val entity = PacketEntity(
-            packetId = packet.packetId,
-            senderVPA = packet.sender,
-            receiverVPA = packet.receiver,
-            amount = packet.amount,
-            createdAt = createdAt,
-            lastSeenAt = now,
-            hopCount = 1,
-            ttl = 10,
-            status = PacketStatus.RELAYING,
-            uploadedBy = null
-        )
-        // insertPacket uses OnConflictStrategy.IGNORE, so re-receiving a packet (or
-        // one already marked UPLOADED/SETTLED) will not overwrite its stored state.
-        withContext(Dispatchers.IO) {
-            ServiceLocator.packetRepository.insertPacket(entity)
-        }
-    }
-
     fun uploadPacketToBridge() {
-        val packet = nearbyService.latestReceivedPacket.value
+        val packet = protocolHandler.latestReceivedPacket.value
             ?: _lastReceivedPacket.value
         if (packet == null) {
             _uploadState.value = UploadUiState.Error("No packet to upload. Receive one via mesh first.")
@@ -229,11 +240,14 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
                     ciphertext = plainPayload
                 )
 
-                // Identify this device as the uploading bridge node and forward the
-                // packet's accumulated hop count so the backend records real
-                // provenance instead of defaulting to "unknown" / 0.
+                // Identify this device as the uploading bridge node and report how many
+                // local forwards this packet has consumed so the backend records real
+                // provenance instead of defaulting to "unknown" / 0. Hops travelled is
+                // derived from the single forwarding budget: DEFAULT_MAX_HOPS minus the
+                // budget still remaining (a never-forwarded packet reports 0).
                 val bridgeNodeId = UserSession.getOrCreateDeviceId(getApplication())
-                val hopCount = existing?.hopCount ?: 0
+                val remaining = existing?.remainingHopCount ?: PacketStore.DEFAULT_MAX_HOPS
+                val hopCount = PacketStore.DEFAULT_MAX_HOPS - remaining
                 val response = RetrofitClient.apiService.bridgeIngest(request, bridgeNodeId, hopCount)
 
                 if (response.isSuccessful) {
@@ -249,18 +263,20 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
                     if (terminal) {
                         logToService("upload complete - status: $status")
 
-                        // Persist the terminal state in Room so the packet is no
-                        // longer pending (CREATED/RELAYING) and PacketStore will not
-                        // restore it after a restart.
-                        if (status == "SETTLED") {
-                            ServiceLocator.packetRepository.markSettled(packet.packetId)
-                        } else {
-                            ServiceLocator.packetRepository.markUploaded(packet.packetId)
-                        }
+                        // Advance the lifecycle through the central state machine so
+                        // Room, the PacketStore cache and the UI stay in sync and every
+                        // transition is validated and logged. Both terminal outcomes mean
+                        // the packet is settled: SETTLED is this device's upload moving the
+                        // money, DUPLICATE_DROPPED means the bridge already ingested it (so
+                        // it is settled elsewhere in the mesh). We do not distinguish the
+                        // two in the lifecycle - both go UPLOADED -> SETTLED. PacketStore
+                        // .transition evicts the packet from the in-memory cache once it is
+                        // terminal, so the explicit removePacket call is no longer needed.
+                        ServiceLocator.packetStore.transition(packet.packetId, PacketStatus.UPLOADED)
+                        ServiceLocator.packetStore.transition(packet.packetId, PacketStatus.SETTLED)
 
-                        ServiceLocator.packetStore.removePacket(packet.packetId)
                         _uploadedPacketIds.value = _uploadedPacketIds.value + packet.packetId
-                        nearbyService.clearLatestPacket()
+                        protocolHandler.clearLatestPacket()
 
                         // Show only this packet's result; do not pin it above a
                         // different, not-yet-uploaded packet. The next pending packet
@@ -305,7 +321,7 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
 
     fun stopNearbyServices() {
         nearbyService.stopAll("explicit disconnect requested")
-        nearbyService.clearLatestPacket()
+        protocolHandler.clearLatestPacket()
         _lastReceivedPacket.value = null
     }
 
@@ -409,7 +425,7 @@ class HomeWalletViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private fun refreshLastReceivedPacket() {
-        val received = nearbyService.latestReceivedPacket.value
+        val received = protocolHandler.latestReceivedPacket.value
         if (received != null && !_uploadedPacketIds.value.contains(received.packetId)) {
             _lastReceivedPacket.value = received
             return

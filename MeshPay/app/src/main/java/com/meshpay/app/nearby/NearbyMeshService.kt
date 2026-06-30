@@ -47,8 +47,10 @@ class NearbyMeshService private constructor(context: Context) {
     )
     val logEvents: SharedFlow<String> = _logEvents.asSharedFlow()
 
-    private val _receivedPackets = MutableSharedFlow<MeshPacket>(extraBufferCapacity = 10)
-    val receivedPackets: SharedFlow<MeshPacket> = _receivedPackets.asSharedFlow()
+    // Transport only: raw inbound payloads, tagged with the source endpoint. Protocol
+    // meaning is assigned by MeshProtocolHandler, not here.
+    private val _receivedMessages = MutableSharedFlow<InboundMessage>(extraBufferCapacity = 10)
+    val receivedMessages: SharedFlow<InboundMessage> = _receivedMessages.asSharedFlow()
 
     private val _connectedEndpoints = MutableStateFlow<Set<String>>(emptySet())
     val connectedEndpoints: StateFlow<Set<String>> = _connectedEndpoints.asStateFlow()
@@ -61,9 +63,6 @@ class NearbyMeshService private constructor(context: Context) {
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
-
-    private val _latestReceivedPacket = MutableStateFlow<MeshPacket?>(null)
-    val latestReceivedPacket: StateFlow<MeshPacket?> = _latestReceivedPacket.asStateFlow()
 
     @Volatile
     private var callbackScope: CoroutineScope? = null
@@ -331,34 +330,39 @@ class NearbyMeshService private constructor(context: Context) {
         }
     }
 
-    suspend fun sendMeshPacket(endpointId: String, packet: MeshPacket): Boolean {
+    suspend fun sendMessage(endpointId: String, message: String): Boolean {
         val bytes = withContext(Dispatchers.IO) {
-            MeshPacketSerializer.serialize(packet).toByteArray(StandardCharsets.UTF_8)
+            message.toByteArray(StandardCharsets.UTF_8)
         }
-        return sendPayloadBytes(endpointId, bytes, packet.packetId)
+        return sendPayloadBytes(endpointId, bytes)
     }
 
-    suspend fun broadcastMeshPacket(packet: MeshPacket): Boolean {
+    /**
+     * Sends [message] to the active peer. Returns the endpoint it was delivered to, or
+     * null if there was no peer or the send failed. Callers use the endpoint to track
+     * reliable delivery (awaiting-ACK).
+     */
+    suspend fun broadcastMessage(message: String): String? {
         val endpointId = activeEndpoint()
         if (endpointId == null) {
-            logEvent("No connected peers to send packet to")
-            return false
+            logEvent("No connected peers to send message to")
+            return null
         }
 
         val bytes = withContext(Dispatchers.IO) {
-            MeshPacketSerializer.serialize(packet).toByteArray(StandardCharsets.UTF_8)
+            message.toByteArray(StandardCharsets.UTF_8)
         }
 
-        return sendPayloadBytes(endpointId, bytes, packet.packetId)
+        return if (sendPayloadBytes(endpointId, bytes)) endpointId else null
     }
 
-    private suspend fun sendPayloadBytes(endpointId: String, bytes: ByteArray, packetId: String): Boolean {
+    private suspend fun sendPayloadBytes(endpointId: String, bytes: ByteArray): Boolean {
         if (!_connectedEndpoints.value.contains(endpointId)) {
             logEvent("Payload send skipped, endpoint not connected: $endpointId")
             return false
         }
 
-        logEvent("Sending payload ${packetId.take(8)} to $endpointId")
+        logEvent("Sending payload (${bytes.size} bytes) to $endpointId")
         val result = withContext(Dispatchers.IO) {
             runCatching {
                 connectionsClient.sendPayload(endpointId, Payload.fromBytes(bytes)).awaitUnit()
@@ -377,10 +381,6 @@ class NearbyMeshService private constructor(context: Context) {
     @OptIn(ExperimentalCoroutinesApi::class)
     fun clearLogs() {
         _logEvents.resetReplayCache()
-    }
-
-    fun clearLatestPacket() {
-        _latestReceivedPacket.value = null
     }
 
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
@@ -521,17 +521,14 @@ class NearbyMeshService private constructor(context: Context) {
             if (payload.type == Payload.Type.BYTES) {
                 val bytes = payload.asBytes() ?: return
                 logEvent("Payload received from $endpointId")
-                launchFromCallback("process payload") {
-                    val packet = withContext(Dispatchers.IO) {
-                        val json = String(bytes, StandardCharsets.UTF_8)
-                        MeshPacketSerializer.deserialize(json)
+                // Transport only: decode bytes to a UTF-8 string and hand the raw
+                // message off. Deserialization and protocol routing belong to
+                // MeshProtocolHandler, not to this transport layer.
+                launchFromCallback("emit inbound message") {
+                    val message = withContext(Dispatchers.IO) {
+                        String(bytes, StandardCharsets.UTF_8)
                     }
-                    if (packet != null) {
-                        _latestReceivedPacket.value = packet
-                        _receivedPackets.emit(packet)
-                    } else {
-                        logEvent("Payload parse failed from $endpointId")
-                    }
+                    _receivedMessages.emit(InboundMessage(endpointId, message))
                 }
             }
         }

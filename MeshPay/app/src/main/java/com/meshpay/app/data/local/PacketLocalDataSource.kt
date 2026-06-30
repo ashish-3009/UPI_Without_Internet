@@ -28,14 +28,11 @@ class PacketLocalDataSource(private val packetDao: PacketDao) {
     suspend fun getPendingPackets(): List<PacketEntity> =
         packetDao.getPendingPackets()
 
-    suspend fun markUploaded(packetId: String) =
-        packetDao.markUploaded(packetId)
+    suspend fun transitionStatus(packetId: String, target: String, validSources: List<String>): Int =
+        packetDao.transitionStatus(packetId, target, validSources)
 
-    suspend fun markSettled(packetId: String) =
-        packetDao.markSettled(packetId)
-
-    suspend fun markExpired(packetId: String) =
-        packetDao.markExpired(packetId)
+    suspend fun decrementRemainingHop(packetId: String): Int =
+        packetDao.decrementRemainingHop(packetId)
 
     suspend fun exists(packetId: String): Boolean =
         packetDao.exists(packetId)

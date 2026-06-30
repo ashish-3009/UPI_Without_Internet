@@ -9,6 +9,9 @@ enum class PacketStatus {
     RELAYING,
     UPLOADED,
     SETTLED,
+    // Reserved future state for an explicit failure path. Currently unused: no
+    // transition targets it (see PacketLifecycle). Kept so persisted values and
+    // the enum ordinal layout stay stable for when a failure path is added.
     FAILED,
     EXPIRED
 }

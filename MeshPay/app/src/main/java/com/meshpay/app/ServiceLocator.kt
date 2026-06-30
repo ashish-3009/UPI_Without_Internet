@@ -8,6 +8,8 @@ import com.meshpay.app.data.local.TransactionLocalDataSource
 import com.meshpay.app.data.repository.PacketRepository
 import com.meshpay.app.data.repository.TransactionRepository
 import com.meshpay.app.data.local.PacketStore
+import com.meshpay.app.nearby.MeshProtocolHandler
+import com.meshpay.app.nearby.NearbyMeshService
 
 /**
  * Application-scoped service locator for the Room persistence layer.
@@ -22,6 +24,7 @@ import com.meshpay.app.data.local.PacketStore
 object ServiceLocator {
 
     private lateinit var database: MeshPayDatabase
+    private lateinit var appContext: Context
 
     val packetRepository: PacketRepository by lazy {
         val dao = database.packetDao()
@@ -39,11 +42,27 @@ object ServiceLocator {
         PacketStore(packetRepository)
     }
 
+    /**
+     * Owns the sync protocol (serialization + ADVERTISEMENT/REQUEST/PACKET processing).
+     * Bridges the transport singleton [NearbyMeshService] with the data layer; the
+     * ViewModels drive it from their own scopes.
+     */
+    val meshProtocolHandler: MeshProtocolHandler by lazy {
+        MeshProtocolHandler(
+            transport = NearbyMeshService.getInstance(appContext),
+            packetStore = packetStore,
+            packetRepository = packetRepository
+        )
+    }
+
     fun init(context: Context) {
+        appContext = context.applicationContext
         database = Room.databaseBuilder(
-            context.applicationContext,
+            appContext,
             MeshPayDatabase::class.java,
             "meshpay.db"
-        ).build()
+        )
+            .addMigrations(MeshPayDatabase.MIGRATION_1_2)
+            .build()
     }
 }

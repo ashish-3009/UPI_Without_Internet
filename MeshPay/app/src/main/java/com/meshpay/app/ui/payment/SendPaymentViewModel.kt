@@ -19,6 +19,7 @@ import java.util.UUID
 import com.meshpay.app.ServiceLocator
 import com.meshpay.app.data.entity.PacketEntity
 import com.meshpay.app.data.entity.PacketStatus
+import com.meshpay.app.data.local.PacketStore
 
 sealed class SendPaymentUiState {
     data object Idle : SendPaymentUiState()
@@ -82,14 +83,17 @@ class SendPaymentViewModel(application: Application) : AndroidViewModel(applicat
                 amount = packet.amount,
                 createdAt = Instant.parse(packet.timestamp).toEpochMilli(),
                 lastSeenAt = Instant.parse(packet.timestamp).toEpochMilli(),
-                hopCount = 0,
-                ttl = 10,
+                remainingHopCount = PacketStore.DEFAULT_MAX_HOPS,
                 status = PacketStatus.CREATED,
                 uploadedBy = null
             )
             ServiceLocator.packetRepository.insertPacket(packetEntity)
 
-            val sent = nearbyService.broadcastMeshPacket(packet)
+            val sent = ServiceLocator.meshProtocolHandler.broadcastPacket(packet)
+            if (sent) {
+                // Broadcast succeeded: the packet is now relaying through the mesh.
+                ServiceLocator.packetStore.transition(packet.packetId, PacketStatus.RELAYING)
+            }
             _uiState.value = if (sent) {
                 val pendingBalance = walletRepository.getWallet(sender)
                     .getOrNull()

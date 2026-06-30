@@ -28,14 +28,17 @@ class PacketRepository(private val localDataSource: PacketLocalDataSource) {
     suspend fun getPendingPackets(): List<PacketEntity> =
         localDataSource.getPendingPackets()
 
-    suspend fun markUploaded(packetId: String) =
-        localDataSource.markUploaded(packetId)
+    /**
+     * Thin data-access delegate for the guarded status update. Lifecycle validation
+     * and logging live in the orchestration layer ([com.meshpay.app.data.local.PacketStore]),
+     * not here. Returns rows updated (0 = guard rejected or packet missing).
+     */
+    suspend fun transitionStatus(packetId: String, target: String, validSources: List<String>): Int =
+        localDataSource.transitionStatus(packetId, target, validSources)
 
-    suspend fun markSettled(packetId: String) =
-        localDataSource.markSettled(packetId)
-
-    suspend fun markExpired(packetId: String) =
-        localDataSource.markExpired(packetId)
+    /** Consumes one hop from a pending packet's forwarding budget. Returns rows updated. */
+    suspend fun decrementRemainingHop(packetId: String): Int =
+        localDataSource.decrementRemainingHop(packetId)
 
     suspend fun exists(packetId: String): Boolean =
         localDataSource.exists(packetId)

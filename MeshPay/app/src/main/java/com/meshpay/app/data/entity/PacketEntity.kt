@@ -19,8 +19,15 @@ data class PacketEntity(
     val amount: Double,
     val createdAt: Long,
     val lastSeenAt: Long,
-    val hopCount: Int,
-    val ttl: Int,
+    /**
+     * Forwarding budget (Task 17): the number of times this node may still relay the
+     * packet onward. Initialized to [com.meshpay.app.data.local.PacketStore.DEFAULT_MAX_HOPS]
+     * and decremented by exactly one on each successful forward (see
+     * MeshProtocolHandler.handleRequest). Retries and receives never change it. When it
+     * reaches 0 the packet is retired to EXPIRED through the lifecycle. This single
+     * persisted value is the sole forwarding budget - there is no separate hopCount/ttl.
+     */
+    val remainingHopCount: Int,
     val status: PacketStatus,
     val uploadedBy: String? = null
 )

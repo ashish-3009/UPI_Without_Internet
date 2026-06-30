@@ -42,16 +42,29 @@ interface PacketDao {
     @Query("SELECT * FROM packets WHERE status IN ('CREATED', 'RELAYING') ORDER BY createdAt ASC")
     suspend fun getPendingPackets(): List<PacketEntity>
 
-    // ── Status Updates ───────────────────────────────────────
+    // ── Status Transition ────────────────────────────────────
 
-    @Query("UPDATE packets SET status = 'SETTLED' WHERE packetId = :packetId")
-    suspend fun markSettled(packetId: String)
+    /**
+     * Atomically moves a packet to [target] only if its current status is one of
+     * [validSources]. The guard keeps the lifecycle transition safe against
+     * concurrent writers and forbids illegal moves at the database level.
+     * Returns the number of rows updated (0 = guard rejected or packet missing).
+     */
+    @Query("UPDATE packets SET status = :target WHERE packetId = :packetId AND status IN (:validSources)")
+    suspend fun transitionStatus(packetId: String, target: String, validSources: List<String>): Int
 
-    @Query("UPDATE packets SET status = 'UPLOADED' WHERE packetId = :packetId")
-    suspend fun markUploaded(packetId: String)
+    // ── Forwarding Budget (Task 17) ──────────────────────────
 
-    @Query("UPDATE packets SET status = 'EXPIRED' WHERE packetId = :packetId")
-    suspend fun markExpired(packetId: String)
+    /**
+     * Atomically consumes one hop from a still-pending packet's forwarding budget
+     * just before it is relayed. Triple-guarded so it can never over-forward: the
+     * packet must be pending (CREATED/RELAYING) AND have budget left
+     * (remainingHopCount > 0). Returns rows updated (0 = not pending, missing, or
+     * the budget is already exhausted). Retransmissions and receives must NOT call
+     * this - only a genuine forward consumes a hop.
+     */
+    @Query("UPDATE packets SET remainingHopCount = remainingHopCount - 1 WHERE packetId = :packetId AND status IN ('CREATED', 'RELAYING') AND remainingHopCount > 0")
+    suspend fun decrementRemainingHop(packetId: String): Int
 
     // ── Utility ──────────────────────────────────────────────
 
